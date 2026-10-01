@@ -98,7 +98,7 @@
 use std::{
     any::Any,
     collections::HashSet,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use wayland_server::{
@@ -115,7 +115,7 @@ mod handlers;
 mod pool;
 
 use crate::{
-    backend::allocator::format::get_bpp,
+    backend::allocator::{dmabuf::Dmabuf, format::get_bpp, udmabuf::UdmabufAllocator},
     utils::{HookId, UnmanagedResource, hook::Hook},
     wayland::GlobalData,
 };
@@ -498,4 +498,40 @@ impl ShmBufferUserData {
             guard.remove(id);
         }
     }
+}
+// временные комменты:
+// /dev/udmabuf открывается всего один раз на всю программу
+// ещё надо посмотреть, стилистика функции подходит по стилю всему остальному тут или нет
+// но пока функция далека от конченой версиия
+//
+// не уверен, что так лучше, быть может в некоторых случаях
+// надо всё таки заново открывать, а не всего один раз в целом, надо этот момент обязательно проверить
+// насрал коммегтами дабы минимизировать не осознанные и тупые решения
+//
+// ограничить функцию под линукс, и удостовериться в том, что на других всё рабоает как было без изменений
+// интересно, есть ли аналог такого в самом freebsd
+pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
+    static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
+    let allocator = UDMABUF.as_ref()?;
+    // пока не тут реализованы выходы из функции
+    // это так называемая база, но мне она - не нравится, и быть может в проекте тоже таким не польузются
+    // пока оставлю
+
+    let user_data = buffer.data::<ShmBufferUserData>()?; // надо падать
+    let fourcc = shm_format_to_fourcc(user_data.data.format)?; // надо падать
+    let size = (user_data.data.height as usize * user_data.data.stride as usize)
+        .next_multiple_of(rustix::param::page_size());
+
+    allocator
+        .create_buffer_from_memfd(
+            user_data.pool.fd(),
+            user_data.data.offset as usize,
+            size,
+            fourcc,
+            user_data.data.width as u32,
+            user_data.data.height as u32,
+            user_data.data.stride as u32,
+        )
+        .map_err(|err| tracing::info!(?err, "udmabuf: не вышло"))
+        .ok()
 }

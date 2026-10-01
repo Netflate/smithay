@@ -716,7 +716,27 @@ impl<R: Renderer + ImportMemWl + ImportEgl + ImportDmaWl> ImportAll for R {
         damage: &[Rectangle<i32, BufferCoord>],
     ) -> Option<Result<Self::TextureId, Self::Error>> {
         match buffer_type(buffer) {
-            Some(BufferType::Shm) => Some(self.import_shm_buffer(buffer, surface, damage)),
+            // важно не забыть, даже в случаях когда udmabuf работает
+            // это не гарантирует, что это лучший способ, возможно остальные получше будут?
+            // надо будет проверить, и подумать над тем, как это тут реализвовать когда тут
+            // imporatll
+
+            // убрать мусор
+            // флаг который запоминает, что udmabuf не сработал
+            Some(BufferType::Shm) => {
+                if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
+                    //хероновый импорт? Последовательности впрочем точно нет, хз как по проекту, надо будет проверить
+                    match self.import_dmabuf(&dmabuf, Some(damage)) {
+                        // для красоты возможно следует в отдельную функцию вывести???
+                        Ok(texture) => {
+                            tracing::info!("yes udmabuf");
+                            return Some(Ok(texture));
+                        }
+                        Err(err) => tracing::info!(%err, "no udmabuf"), // трейсинг
+                    }
+                }
+                Some(self.import_shm_buffer(buffer, surface, damage))
+            }
             Some(BufferType::Egl) => Some(self.import_egl_buffer(buffer, surface, damage)),
             Some(BufferType::Dma) => Some(self.import_dma_buffer(buffer, surface, damage)),
             _ => None,
@@ -736,7 +756,18 @@ impl<R: Renderer + ImportMemWl + ImportDmaWl> ImportAll for R {
         damage: &[Rectangle<i32, BufferCoord>],
     ) -> Option<Result<Self::TextureId, Self::Error>> {
         match buffer_type(buffer) {
-            Some(BufferType::Shm) => Some(self.import_shm_buffer(buffer, surface, damage)),
+            Some(BufferType::Shm) => {
+                if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
+                    match self.import_dmabuf(&dmabuf, Some(damage)) {
+                        Ok(texture) => {
+                            tracing::info!("yes udmabuf");
+                            return Some(Ok(texture));
+                        }
+                        Err(err) => tracing::info!(%err, "no udmabuf"), // изменить
+                    }
+                }
+                Some(self.import_shm_buffer(buffer, surface, damage))
+            }
             Some(BufferType::Dma) => Some(self.import_dma_buffer(buffer, surface, damage)),
             _ => None,
         }
