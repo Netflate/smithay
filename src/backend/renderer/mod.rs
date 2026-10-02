@@ -724,15 +724,20 @@ impl<R: Renderer + ImportMemWl + ImportEgl + ImportDmaWl> ImportAll for R {
             // убрать мусор
             // флаг который запоминает, что udmabuf не сработал
             Some(BufferType::Shm) => {
+                tracing::info!("так так так");
                 if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
                     //хероновый импорт? Последовательности впрочем точно нет, хз как по проекту, надо будет проверить
+                    tracing::info!("получилось с udmabuf поговорить");
                     match self.import_dmabuf(&dmabuf, Some(damage)) {
                         // для красоты возможно следует в отдельную функцию вывести???
                         Ok(texture) => {
-                            tracing::info!("yes udmabuf");
+                            tracing::info!("получилось буфер создать");
                             return Some(Ok(texture));
                         }
-                        Err(err) => tracing::info!(%err, "no udmabuf"), // трейсинг
+                        Err(err) => {
+                            tracing::info!(%err, "no udmabuf");
+                            crate::wayland::shm::mark_udmabuf_failed(buffer);
+                        }
                     }
                 }
                 Some(self.import_shm_buffer(buffer, surface, damage))
@@ -758,12 +763,17 @@ impl<R: Renderer + ImportMemWl + ImportDmaWl> ImportAll for R {
         match buffer_type(buffer) {
             Some(BufferType::Shm) => {
                 if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
+                    //хероновый импорт? Последовательности впрочем точно нет, хз как по проекту, надо будет проверить
                     match self.import_dmabuf(&dmabuf, Some(damage)) {
+                        // для красоты возможно следует в отдельную функцию вывести???
                         Ok(texture) => {
                             tracing::info!("yes udmabuf");
                             return Some(Ok(texture));
                         }
-                        Err(err) => tracing::info!(%err, "no udmabuf"), // изменить
+                        Err(err) => {
+                            tracing::info!(%err, "no udmabuf");
+                            crate::wayland::shm::mark_udmabuf_failed(buffer);
+                        }
                     }
                 }
                 Some(self.import_shm_buffer(buffer, surface, damage))

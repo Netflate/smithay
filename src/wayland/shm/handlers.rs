@@ -1,7 +1,7 @@
 use crate::wayland::{
     Dispatch2, GlobalData, GlobalDispatch2,
     buffer::BufferHandler,
-    shm::{ShmBufferUserData, wl_bytes_per_pixel},
+    shm::{ShmBufferUserData, UdmabufState, wl_bytes_per_pixel},
 };
 
 use super::{
@@ -9,7 +9,11 @@ use super::{
     pool::{Pool, ResizeError},
 };
 
-use std::{num::NonZeroUsize, os::unix::io::AsRawFd, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    os::unix::io::AsRawFd,
+    sync::{Arc, Mutex},
+};
 use wayland_server::{
     DataInit, Dispatch, DisplayHandle, New, Resource, WEnum,
     backend::ClientId,
@@ -168,6 +172,7 @@ where
                                 format,
                             },
                             destruction_hooks: Default::default(),
+                            udmabuf: Mutex::new(UdmabufState::NotTried),
                         };
 
                         data_init.init(buffer, data);

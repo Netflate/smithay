@@ -98,6 +98,7 @@
 use std::{
     any::Any,
     collections::HashSet,
+    io,
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -479,6 +480,7 @@ pub struct ShmBufferUserData {
     pub(crate) pool: Arc<Pool>,
     pub(crate) data: BufferData,
     destruction_hooks: Mutex<Vec<Hook<DestructionHook>>>,
+    udmabuf: Mutex<UdmabufState>,
 }
 
 impl ShmBufferUserData {
@@ -499,6 +501,13 @@ impl ShmBufferUserData {
         }
     }
 }
+
+#[derive(Debug)]
+enum UdmabufState {
+    NotTried,
+    Failed,
+    Imported(Dmabuf),
+}
 // временные комменты:
 // /dev/udmabuf открывается всего один раз на всю программу
 // ещё надо посмотреть, стилистика функции подходит по стилю всему остальному тут или нет
@@ -510,28 +519,72 @@ impl ShmBufferUserData {
 //
 // ограничить функцию под линукс, и удостовериться в том, что на других всё рабоает как было без изменений
 // интересно, есть ли аналог такого в самом freebsd
+//
+// надо флаг сделать
+// также надо подумать, что работать с одной и более гпу
+// и подумать когда именно пробовать
+//
+// stride % 256
+//
+// ладно, пусть тот будет мой личный блокнот с буллщитом, раз на то пошло
+//
+// Pixman работеат через старый метод, и делает это без копии. udmabuf может ему только помешать, возможно для него надо НЕ использовать udmabuf,
+// а с этим загвоздка в importall
+//
+// обязательно проверить есть ли выигрыш у обоих дискретной и внутреннойгпу
+//
+// Каждый Imported держит в процессе композитора открытый fd и закреплённые страницы клиента пока жив wl_buffer, раньше - был всего один
+// может съесть fd композитора??? .
+//
+// Конец пула. size округляется вверх до 4096. Если буфер стоит в самом конце пула, а пул не кратен странице, ядро откажет, и сработает откат. KWin делает так же
+//
+// слои с двумя плоскостями, ну, я хз надо ли реалзация для них писать или нет, если нет, то об этом надо написать я полагаю
+//
+// теоритически клиент может начать рисовать в кард, который гпу еще не дочитал, что создаст визуальный мусор
+//
+// можно подумать о прямомо использовании этой фигни, чисто ради интереса, но это другой pr
 pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
     static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
     let allocator = UDMABUF.as_ref()?;
-    // пока не тут реализованы выходы из функции
-    // это так называемая база, но мне она - не нравится, и быть может в проекте тоже таким не польузются
-    // пока оставлю
 
-    let user_data = buffer.data::<ShmBufferUserData>()?; // надо падать
-    let fourcc = shm_format_to_fourcc(user_data.data.format)?; // надо падать
+    let user_data = buffer.data::<ShmBufferUserData>()?;
+    match &*user_data.udmabuf.lock().unwrap() {
+        UdmabufState::Imported(dmabuf) => return Some(dmabuf.clone()),
+        UdmabufState::Failed => return None,
+        UdmabufState::NotTried => {}
+    }
+
+    match create_udmabuf(allocator, user_data) {
+        Ok(dmabuf) => {
+            *user_data.udmabuf.lock().unwrap() = UdmabufState::Imported(dmabuf.clone());
+            Some(dmabuf)
+        }
+        Err(err) => {
+            tracing::info!(?err, "udmabuf: не вышло");
+            *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
+            None
+        }
+    }
+}
+
+fn create_udmabuf(allocator: &UdmabufAllocator, user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
+    let fourcc = shm_format_to_fourcc(user_data.data.format).ok_or(io::ErrorKind::Unsupported)?;
     let size = (user_data.data.height as usize * user_data.data.stride as usize)
         .next_multiple_of(rustix::param::page_size());
 
-    allocator
-        .create_buffer_from_memfd(
-            user_data.pool.fd(),
-            user_data.data.offset as usize,
-            size,
-            fourcc,
-            user_data.data.width as u32,
-            user_data.data.height as u32,
-            user_data.data.stride as u32,
-        )
-        .map_err(|err| tracing::info!(?err, "udmabuf: не вышло"))
-        .ok()
+    allocator.create_buffer_from_memfd(
+        user_data.pool.fd(),
+        user_data.data.offset as usize,
+        size,
+        fourcc,
+        user_data.data.width as u32,
+        user_data.data.height as u32,
+        user_data.data.stride as u32,
+    )
+}
+
+pub(crate) fn mark_udmabuf_failed(buffer: &wl_buffer::WlBuffer) {
+    if let Some(user_data) = buffer.data::<ShmBufferUserData>() {
+        *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
+    }
 }
