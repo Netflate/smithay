@@ -1211,7 +1211,11 @@ impl ImportDma for PixmanRenderer {
 }
 
 #[cfg(feature = "wayland_frontend")]
-impl ImportDmaWl for PixmanRenderer {}
+impl ImportDmaWl for PixmanRenderer {
+    fn prefers_udmabuf(&self) -> bool {
+        false
+    }
+}
 
 impl Bind<Dmabuf> for PixmanRenderer {
     #[profiling::function]

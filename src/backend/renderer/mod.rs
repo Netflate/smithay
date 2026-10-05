@@ -637,6 +637,14 @@ pub trait ImportDmaWl: ImportDma {
             .expect("import_dma_buffer without checking buffer type?");
         self.import_dmabuf(dmabuf, Some(damage))
     }
+
+    /// Whether [`ImportAll`] should try to import shm buffers through udmabuf and
+    /// [`ImportDma`] before safely falling back to [`ImportMemWl`].
+    ///
+    /// Renderers that can access shm memory directly without copying should return `false`.
+    fn prefers_udmabuf(&self) -> bool {
+        true
+    }
 }
 
 /// Trait for Renderers supporting importing dmabufs.
@@ -712,6 +720,10 @@ fn import_shm_udmabuf<R: ImportDmaWl>(
     buffer: &wl_buffer::WlBuffer,
     damage: &[Rectangle<i32, BufferCoord>],
 ) -> Option<R::TextureId> {
+    if !renderer.prefers_udmabuf() {
+        return None;
+    }
+
     let dmabuf = crate::wayland::shm::try_udmabuf(buffer)?;
     match renderer.import_dmabuf(&dmabuf, Some(damage)) {
         Ok(texture) => Some(texture),
