@@ -705,7 +705,7 @@ pub trait ImportAll: Renderer {
 ///
 /// avoids copying the buffer contents, so it is preferred over [`ImportMemWl`].
 ///
-/// Returns `None` if this doesn't work, then safely falls back to [`ImportMemWl`].
+/// Returns `None` if this doesn't work, then caller safely falls back to [`ImportMemWl`].
 #[cfg(feature = "wayland_frontend")]
 fn import_shm_udmabuf<R: ImportDmaWl>(
     renderer: &mut R,

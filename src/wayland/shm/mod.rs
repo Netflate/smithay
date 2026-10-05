@@ -502,8 +502,9 @@ impl ShmBufferUserData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 enum UdmabufState {
+    #[default]
     NotTried,
     Failed,
     Imported(Dmabuf),
@@ -561,6 +562,7 @@ fn create_udmabuf(allocator: &UdmabufAllocator, user_data: &ShmBufferUserData) -
     )
 }
 
+/// Marking buffer as not importable via udmabuf, to avoid retrying on every import
 pub(crate) fn mark_udmabuf_failed(buffer: &wl_buffer::WlBuffer) {
     if let Some(user_data) = buffer.data::<ShmBufferUserData>() {
         *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
