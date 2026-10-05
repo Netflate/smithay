@@ -183,6 +183,7 @@ impl Pool {
         self.inner.as_ref().unwrap().size()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.inner.as_ref().unwrap().fd.as_fd()
     }

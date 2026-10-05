@@ -99,7 +99,7 @@ use std::{
     any::Any,
     collections::HashSet,
     io,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 
 use wayland_server::{
@@ -116,7 +116,7 @@ mod handlers;
 mod pool;
 
 use crate::{
-    backend::allocator::{dmabuf::Dmabuf, format::get_bpp, udmabuf::UdmabufAllocator},
+    backend::allocator::{dmabuf::Dmabuf, format::get_bpp},
     utils::{HookId, UnmanagedResource, hook::Hook},
     wayland::GlobalData,
 };
@@ -515,9 +515,6 @@ enum UdmabufState {
 /// Result is cached in the buffer's user data, failures as well, so udmabuf
 /// is created at most once per buffer.
 pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
-    static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
-    let allocator = UDMABUF.as_ref()?;
-
     let user_data = buffer.data::<ShmBufferUserData>()?;
     match &*user_data.udmabuf.lock().unwrap() {
         UdmabufState::Imported(dmabuf) => return Some(dmabuf.clone()),
@@ -525,13 +522,13 @@ pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
         UdmabufState::NotTried => {}
     }
 
-    match create_udmabuf(allocator, user_data) {
+    match create_udmabuf(user_data) {
         Ok(dmabuf) => {
             *user_data.udmabuf.lock().unwrap() = UdmabufState::Imported(dmabuf.clone());
             Some(dmabuf)
         }
         Err(err) => {
-            tracing::info!(
+            tracing::debug!(
                 ?err,
                 width = user_data.data.width,
                 height = user_data.data.height,
@@ -545,7 +542,14 @@ pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
     }
 }
 
-fn create_udmabuf(allocator: &UdmabufAllocator, user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
+#[cfg(target_os = "linux")]
+fn create_udmabuf(user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
+    use crate::backend::allocator::udmabuf::UdmabufAllocator;
+    use std::sync::LazyLock;
+
+    static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
+    let allocator = UDMABUF.as_ref().ok_or(io::ErrorKind::NotFound)?;
+
     let fourcc = shm_format_to_fourcc(user_data.data.format).ok_or(io::ErrorKind::Unsupported)?;
     // udmabuf only works with whole pages
     let size = (user_data.data.height as usize * user_data.data.stride as usize)
@@ -560,6 +564,11 @@ fn create_udmabuf(allocator: &UdmabufAllocator, user_data: &ShmBufferUserData) -
         user_data.data.height as u32,
         user_data.data.stride as u32,
     )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_udmabuf(_user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Marking buffer as not importable via udmabuf, to avoid retrying on every import
