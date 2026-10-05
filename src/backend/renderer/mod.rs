@@ -701,6 +701,28 @@ pub trait ImportAll: Renderer {
     ) -> Option<Result<Self::TextureId, Self::Error>>;
 }
 
+/// Tries to import a shm buffer through udmabuf and [`ImportDma`].
+///
+/// avoids copying the buffer contents, so it is preferred over [`ImportMemWl`].
+///
+/// Returns `None` if this doesn't work, then safely falls back to [`ImportMemWl`].
+#[cfg(feature = "wayland_frontend")]
+fn import_shm_udmabuf<R: ImportDmaWl>(
+    renderer: &mut R,
+    buffer: &wl_buffer::WlBuffer,
+    damage: &[Rectangle<i32, BufferCoord>],
+) -> Option<R::TextureId> {
+    let dmabuf = crate::wayland::shm::try_udmabuf(buffer)?;
+    match renderer.import_dmabuf(&dmabuf, Some(damage)) {
+        Ok(texture) => Some(texture),
+        Err(err) => {
+            tracing::debug!(%err, "Failed to import udmabuf, falling back to shm import");
+            crate::wayland::shm::mark_udmabuf_failed(buffer);
+            None
+        }
+    }
+}
+
 // TODO: Do this with specialization, when possible and do default implementations
 #[cfg(all(
     feature = "wayland_frontend",
@@ -716,29 +738,9 @@ impl<R: Renderer + ImportMemWl + ImportEgl + ImportDmaWl> ImportAll for R {
         damage: &[Rectangle<i32, BufferCoord>],
     ) -> Option<Result<Self::TextureId, Self::Error>> {
         match buffer_type(buffer) {
-            // важно не забыть, даже в случаях когда udmabuf работает
-            // это не гарантирует, что это лучший способ, возможно остальные получше будут?
-            // надо будет проверить, и подумать над тем, как это тут реализвовать когда тут
-            // imporatll
-
-            // убрать мусор
-            // флаг который запоминает, что udmabuf не сработал
             Some(BufferType::Shm) => {
-                tracing::info!("так так так");
-                if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
-                    //хероновый импорт? Последовательности впрочем точно нет, хз как по проекту, надо будет проверить
-                    tracing::info!("получилось с udmabuf поговорить");
-                    match self.import_dmabuf(&dmabuf, Some(damage)) {
-                        // для красоты возможно следует в отдельную функцию вывести???
-                        Ok(texture) => {
-                            tracing::info!("получилось буфер создать");
-                            return Some(Ok(texture));
-                        }
-                        Err(err) => {
-                            tracing::info!(%err, "no udmabuf");
-                            crate::wayland::shm::mark_udmabuf_failed(buffer);
-                        }
-                    }
+                if let Some(texture) = import_shm_udmabuf(self, buffer, damage) {
+                    return Some(Ok(texture));
                 }
                 Some(self.import_shm_buffer(buffer, surface, damage))
             }
@@ -762,19 +764,8 @@ impl<R: Renderer + ImportMemWl + ImportDmaWl> ImportAll for R {
     ) -> Option<Result<Self::TextureId, Self::Error>> {
         match buffer_type(buffer) {
             Some(BufferType::Shm) => {
-                if let Some(dmabuf) = crate::wayland::shm::try_udmabuf(buffer) {
-                    //хероновый импорт? Последовательности впрочем точно нет, хз как по проекту, надо будет проверить
-                    match self.import_dmabuf(&dmabuf, Some(damage)) {
-                        // для красоты возможно следует в отдельную функцию вывести???
-                        Ok(texture) => {
-                            tracing::info!("yes udmabuf");
-                            return Some(Ok(texture));
-                        }
-                        Err(err) => {
-                            tracing::info!(%err, "no udmabuf");
-                            crate::wayland::shm::mark_udmabuf_failed(buffer);
-                        }
-                    }
+                if let Some(texture) = import_shm_udmabuf(self, buffer, damage) {
+                    return Some(Ok(texture));
                 }
                 Some(self.import_shm_buffer(buffer, surface, damage))
             }

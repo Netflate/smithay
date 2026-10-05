@@ -508,41 +508,11 @@ enum UdmabufState {
     Failed,
     Imported(Dmabuf),
 }
-// временные комменты:
-// /dev/udmabuf открывается всего один раз на всю программу
-// ещё надо посмотреть, стилистика функции подходит по стилю всему остальному тут или нет
-// но пока функция далека от конченой версиия
-//
-// не уверен, что так лучше, быть может в некоторых случаях
-// надо всё таки заново открывать, а не всего один раз в целом, надо этот момент обязательно проверить
-// насрал коммегтами дабы минимизировать не осознанные и тупые решения
-//
-// ограничить функцию под линукс, и удостовериться в том, что на других всё рабоает как было без изменений
-// интересно, есть ли аналог такого в самом freebsd
-//
-// надо флаг сделать
-// также надо подумать, что работать с одной и более гпу
-// и подумать когда именно пробовать
-//
-// stride % 256
-//
-// ладно, пусть тот будет мой личный блокнот с буллщитом, раз на то пошло
-//
-// Pixman работеат через старый метод, и делает это без копии. udmabuf может ему только помешать, возможно для него надо НЕ использовать udmabuf,
-// а с этим загвоздка в importall
-//
-// обязательно проверить есть ли выигрыш у обоих дискретной и внутреннойгпу
-//
-// Каждый Imported держит в процессе композитора открытый fd и закреплённые страницы клиента пока жив wl_buffer, раньше - был всего один
-// может съесть fd композитора??? .
-//
-// Конец пула. size округляется вверх до 4096. Если буфер стоит в самом конце пула, а пул не кратен странице, ядро откажет, и сработает откат. KWin делает так же
-//
-// слои с двумя плоскостями, ну, я хз надо ли реалзация для них писать или нет, если нет, то об этом надо написать я полагаю
-//
-// теоритически клиент может начать рисовать в кард, который гпу еще не дочитал, что создаст визуальный мусор
-//
-// можно подумать о прямомо использовании этой фигни, чисто ради интереса, но это другой pr
+
+/// Returns [`Dmabuf`] sharing memory of this shm buffer, created via udmabuf.
+///
+/// Result is cached in the buffer's user data, failures as well, so udmabuf
+/// is created at most once per buffer.
 pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
     static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
     let allocator = UDMABUF.as_ref()?;
@@ -560,7 +530,14 @@ pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
             Some(dmabuf)
         }
         Err(err) => {
-            tracing::info!(?err, "udmabuf: не вышло");
+            tracing::info!(
+                ?err,
+                width = user_data.data.width,
+                height = user_data.data.height,
+                stride = user_data.data.stride,
+                offset = user_data.data.offset,
+                "error"
+            );
             *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
             None
         }
@@ -569,6 +546,7 @@ pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
 
 fn create_udmabuf(allocator: &UdmabufAllocator, user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
     let fourcc = shm_format_to_fourcc(user_data.data.format).ok_or(io::ErrorKind::Unsupported)?;
+    // udmabuf only works with whole pages
     let size = (user_data.data.height as usize * user_data.data.stride as usize)
         .next_multiple_of(rustix::param::page_size());
 
