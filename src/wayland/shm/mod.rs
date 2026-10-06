@@ -551,10 +551,7 @@ fn create_udmabuf(user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
     let allocator = UDMABUF.as_ref().ok_or(io::ErrorKind::NotFound)?;
 
     let fourcc = shm_format_to_fourcc(user_data.data.format).ok_or(io::ErrorKind::Unsupported)?;
-    // udmabuf only works with whole pages
-    let size = (user_data.data.height as usize * user_data.data.stride as usize)
-        .next_multiple_of(rustix::param::page_size());
-
+    let size = user_data.data.height as usize * user_data.data.stride as usize;
     allocator.create_buffer_from_memfd(
         user_data.pool.fd(),
         user_data.data.offset as usize,
