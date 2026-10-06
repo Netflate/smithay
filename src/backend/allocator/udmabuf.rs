@@ -48,7 +48,8 @@ impl UdmabufAllocator {
     /// For importing to succeed a few additional requirements need to be satisfied:
     /// - the width and height cannot exceed 65535.
     /// - the stride needs to be aligned to [`STRIDE_ALIGN`].
-    /// - size and offset need to be aligned to the platforms page size.
+    /// - size needs to be at least `height * stride`.
+    /// - offset within its page must be aligned to [`STRIDE_ALIGN`].
     ///
     /// Note: dmabufs created through this interface will always be interpreted as linear.
     #[allow(clippy::too_many_arguments)]
@@ -69,18 +70,30 @@ impl UdmabufAllocator {
             return Err(io::ErrorKind::InvalidData.into());
         }
 
-        if !size.is_multiple_of(*PAGE_SIZE) || size < (height * stride) as usize {
+        if size < (height * stride) as usize {
             return Err(io::ErrorKind::InvalidData.into());
         }
 
-        let dma_fd = udmabuf_from_memfd(self.dev.as_fd(), mem_fd.as_fd(), offset as u64, size as u64)?;
+        let plane_offset = offset % *PAGE_SIZE;
+        if !plane_offset.is_multiple_of(STRIDE_ALIGN) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let start = offset - plane_offset;
+        let udmabuf_size = (plane_offset + size).next_multiple_of(*PAGE_SIZE);
+
+        let dma_fd = udmabuf_from_memfd(
+            self.dev.as_fd(),
+            mem_fd.as_fd(),
+            start as u64,
+            udmabuf_size as u64,
+        )?;
         let mut dmabuf = Dmabuf::builder(
             Size::new(width as i32, height as i32),
             format,
             Modifier::Linear,
             DmabufFlags::empty(),
         );
-        dmabuf.add_plane(dma_fd, 0, stride);
+        dmabuf.add_plane(dma_fd, plane_offset as u32, stride);
         dmabuf.build().ok_or_else(|| io::ErrorKind::Unsupported.into())
     }
 }
