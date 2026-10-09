@@ -116,7 +116,10 @@ mod handlers;
 mod pool;
 
 use crate::{
-    backend::allocator::{dmabuf::Dmabuf, format::get_bpp},
+    backend::allocator::{
+        dmabuf::{Dmabuf, DmabufSyncFlags},
+        format::get_bpp,
+    },
     utils::{HookId, UnmanagedResource, hook::Hook},
     wayland::GlobalData,
 };
@@ -508,38 +511,49 @@ enum UdmabufState {
     NotTried,
     Failed,
     Imported(Dmabuf),
+    /// Renderer failed to import it, so the buffer is copied from now on. The udmabuf
+    /// is kept, as another renderer (e.g. on a second GPU) may still read it.
+    Rejected(Dmabuf),
 }
 
-/// Returns [`Dmabuf`] sharing memory of this shm buffer, created via udmabuf.
+/// Returns a [`Dmabuf`] sharing the memory of this shm buffer, created via udmabuf.
 ///
-/// Result is cached in the buffer's user data, failures as well, so udmabuf
+/// The result is cached in the buffer's user data, failures as well, so the udmabuf
 /// is created at most once per buffer.
+///
+/// Also ends CPU access to the udmabuf, so should be called right before importing.
 pub(crate) fn try_udmabuf(buffer: &wl_buffer::WlBuffer) -> Option<Dmabuf> {
     let user_data = buffer.data::<ShmBufferUserData>()?;
-    match &*user_data.udmabuf.lock().unwrap() {
-        UdmabufState::Imported(dmabuf) => return Some(dmabuf.clone()),
-        UdmabufState::Failed => return None,
-        UdmabufState::NotTried => {}
+    // Keep the lock while creating, so concurrent imports (e.g. from several render threads)
+    // share one udmabuf. Syncing only works on the udmabuf the GPU actually reads.
+    let mut state = user_data.udmabuf.lock().unwrap();
+    if matches!(*state, UdmabufState::NotTried) {
+        *state = match create_udmabuf(user_data) {
+            Ok(dmabuf) => UdmabufState::Imported(dmabuf),
+            Err(err) => {
+                tracing::trace!(
+                    ?err,
+                    width = user_data.data.width,
+                    height = user_data.data.height,
+                    stride = user_data.data.stride,
+                    offset = user_data.data.offset,
+                    "Failed to create udmabuf for shm buffer"
+                );
+                UdmabufState::Failed
+            }
+        };
     }
+    let UdmabufState::Imported(dmabuf) = &*state else {
+        return None;
+    };
+    let dmabuf = dmabuf.clone();
+    drop(state);
 
-    match create_udmabuf(user_data) {
-        Ok(dmabuf) => {
-            *user_data.udmabuf.lock().unwrap() = UdmabufState::Imported(dmabuf.clone());
-            Some(dmabuf)
-        }
-        Err(err) => {
-            tracing::debug!(
-                ?err,
-                width = user_data.data.width,
-                height = user_data.data.height,
-                stride = user_data.data.stride,
-                offset = user_data.data.offset,
-                "error"
-            );
-            *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
-            None
-        }
+    // Make its CPU writes visible to the GPU
+    if let Err(err) = dmabuf.sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::WRITE) {
+        tracing::warn!(?err, "Failed to sync udmabuf before GPU access");
     }
+    Some(dmabuf)
 }
 
 #[cfg(target_os = "linux")]
@@ -547,12 +561,16 @@ fn create_udmabuf(user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
     use crate::backend::allocator::udmabuf::UdmabufAllocator;
     use std::sync::LazyLock;
 
-    static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| UdmabufAllocator::new().ok());
+    static UDMABUF: LazyLock<Option<UdmabufAllocator>> = LazyLock::new(|| {
+        UdmabufAllocator::new()
+            .inspect_err(|err| tracing::debug!(?err, "udmabuf is unavailable, shm buffers will be copied"))
+            .ok()
+    });
     let allocator = UDMABUF.as_ref().ok_or(io::ErrorKind::NotFound)?;
 
     let fourcc = shm_format_to_fourcc(user_data.data.format).ok_or(io::ErrorKind::Unsupported)?;
     let size = user_data.data.height as usize * user_data.data.stride as usize;
-    allocator.create_buffer_from_memfd(
+    let dmabuf = allocator.create_buffer_from_memfd(
         user_data.pool.fd(),
         user_data.data.offset as usize,
         size,
@@ -560,7 +578,15 @@ fn create_udmabuf(user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
         user_data.data.width as u32,
         user_data.data.height as u32,
         user_data.data.stride as u32,
-    )
+    )?;
+    // The kernel only accepts the END in `try_udmabuf` after a first START. Together they
+    // make the kernel take the client's CPU writes into account for GPU reads.
+    // This matters where CPU caches aren't coherent with the GPU (e.g. many ARM SoCs),
+    // on x86 it's doing nothing.
+    dmabuf
+        .sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::WRITE)
+        .map_err(io::Error::other)?;
+    Ok(dmabuf)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -568,9 +594,35 @@ fn create_udmabuf(_user_data: &ShmBufferUserData) -> io::Result<Dmabuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Marking buffer as not importable via udmabuf, to avoid retrying on every import
+/// Marks the buffer as not importable via udmabuf, to avoid retrying on every import.
+///
+/// An already created udmabuf is kept, since another renderer may still read it and
+/// `wait_udmabuf_idle` has to wait for that.
 pub(crate) fn mark_udmabuf_failed(buffer: &wl_buffer::WlBuffer) {
     if let Some(user_data) = buffer.data::<ShmBufferUserData>() {
-        *user_data.udmabuf.lock().unwrap() = UdmabufState::Failed;
+        let mut state = user_data.udmabuf.lock().unwrap();
+        *state = match std::mem::take(&mut *state) {
+            UdmabufState::Imported(dmabuf) | UdmabufState::Rejected(dmabuf) => UdmabufState::Rejected(dmabuf),
+            UdmabufState::NotTried | UdmabufState::Failed => UdmabufState::Failed,
+        };
+    }
+}
+
+/// Blocks until the GPU is done reading the udmabuf of this shm buffer.
+///
+/// Called before `wl_buffer.release`, so the client can't overwrite the buffer
+/// while the GPU still reads it.
+pub(crate) fn wait_udmabuf_idle(buffer: &wl_buffer::WlBuffer) {
+    let Some(user_data) = buffer.data::<ShmBufferUserData>() else {
+        return;
+    };
+    let dmabuf = match &*user_data.udmabuf.lock().unwrap() {
+        UdmabufState::Imported(dmabuf) | UdmabufState::Rejected(dmabuf) => dmabuf.clone(),
+        UdmabufState::NotTried | UdmabufState::Failed => return,
+    };
+    // START waits until the GPU is done reading the udmabuf.
+    // Drivers that don't report their reads (e.g. NVIDIA) return immediately.
+    if let Err(err) = dmabuf.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::WRITE) {
+        tracing::warn!(?err, "Failed to wait for GPU reads of udmabuf");
     }
 }

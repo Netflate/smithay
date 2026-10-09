@@ -639,7 +639,7 @@ pub trait ImportDmaWl: ImportDma {
     }
 
     /// Whether [`ImportAll`] should try to import shm buffers through udmabuf and
-    /// [`ImportDma`] before safely falling back to [`ImportMemWl`].
+    /// [`ImportDma`] before falling back to [`ImportMemWl`].
     ///
     /// Renderers that can access shm memory directly without copying should return `false`.
     fn prefers_udmabuf(&self) -> bool {
@@ -711,9 +711,9 @@ pub trait ImportAll: Renderer {
 
 /// Tries to import a shm buffer through udmabuf and [`ImportDma`].
 ///
-/// avoids copying the buffer contents, so it is preferred over [`ImportMemWl`].
+/// This avoids copying the buffer contents, so it is preferred over [`ImportMemWl`].
 ///
-/// Returns `None` if this doesn't work, then caller safely falls back to [`ImportMemWl`].
+/// Returns `None` if that's not possible, the caller then falls back to [`ImportMemWl`].
 #[cfg(feature = "wayland_frontend")]
 fn import_shm_udmabuf<R: ImportDmaWl>(
     renderer: &mut R,
