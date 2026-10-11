@@ -612,6 +612,9 @@ pub(crate) fn mark_udmabuf_failed(buffer: &wl_buffer::WlBuffer) {
 ///
 /// Called before `wl_buffer.release`, so the client can't overwrite the buffer
 /// while the GPU still reads it.
+///
+/// DrmCompositor already keeps these buffers alive until its frames are presented,
+/// this covers rendering outside of it (e.g. nested backends, screencasting).
 pub(crate) fn wait_udmabuf_idle(buffer: &wl_buffer::WlBuffer) {
     let Some(user_data) = buffer.data::<ShmBufferUserData>() else {
         return;
@@ -625,4 +628,17 @@ pub(crate) fn wait_udmabuf_idle(buffer: &wl_buffer::WlBuffer) {
     if let Err(err) = dmabuf.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::WRITE) {
         tracing::warn!(?err, "Failed to wait for GPU reads of udmabuf");
     }
+}
+
+/// Whether the GPU reads this shm buffer's memory directly through udmabuf.
+///
+/// Copied buffers don't need to be kept alive while the GPU renders them, these do.
+#[cfg(feature = "backend_gbm")]
+pub(crate) fn is_udmabuf_backed(buffer: &wl_buffer::WlBuffer) -> bool {
+    buffer.data::<ShmBufferUserData>().is_some_and(|data| {
+        matches!(
+            *data.udmabuf.lock().unwrap(),
+            UdmabufState::Imported(_) | UdmabufState::Rejected(_)
+        )
+    })
 }
